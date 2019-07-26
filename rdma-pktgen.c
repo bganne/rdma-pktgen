@@ -112,6 +112,8 @@ int main(int argc, const char **argv)
 {
     switch (argc) {
         case 2:
+            __builtin_prefetch(packet1 +  0, 0, 1);
+            __builtin_prefetch(packet1 + 64, 0, 1);
             break;
         case 3:
             load_pcap(argv[2]);
