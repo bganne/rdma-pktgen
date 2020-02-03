@@ -1,16 +1,20 @@
-CFLAGS:=-g -Wall -Werror -std=gnu99
+CFLAGS:=-g -Wextra -Werror -std=gnu99
 CFLAGS+=-O2
 LDFLAGS:=-g
 LDLIBS:=-libverbs
 
-all: rdma-pktgen simple_udp.cap
+all: rdma-tx rdma-rx simple_udp.cap
 
-rdma-pktgen: rdma-pktgen.c
+rdma-tx: tx.o common.o
+	$(CC) $(LDFLAGS) -o $@ $^ $(LOADLIBES) $(LDLIBS)
+
+rdma-rx: rx.o common.o
+	$(CC) $(LDFLAGS) -o $@ $^ $(LOADLIBES) $(LDLIBS)
 
 simple_udp.cap: simple_udp.py
 	python $^ > $@
 
 clean:
-	$(RM) rdma-pktgen simple_udp.cap
+	$(RM) *.o rdma-tx rdma-rx simple_udp.cap
 
 .PHONY: all clean

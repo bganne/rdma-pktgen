@@ -10,6 +10,7 @@
 #include <sys/mman.h>
 #include <sys/time.h>
 #include <infiniband/verbs.h>
+#include "common.h"
 
 /*
  * we build a pipeline to tx packets:
@@ -19,19 +20,10 @@
 #define TXSZ    1024
 #define TXNB    2
 
-/*
- * refresh PPS output every n batches
- * we can sustain roughly 20MPPS, refreshing every ~64M packets
- * is roughly every 3-4s
- */
-#define REFRESH ((64UL << 20) / TXSZ)
-
 struct packet {
     uintptr_t addr;
     int len;
 };
-
-#define ALIGNED __attribute__((aligned(64)))
 
 static const char packet1[] ALIGNED = {
     /* ethernet: dst=00:0c:41:82:b2:53, src=00:d0:59:6c:40:4e, type=0x0800 (IPv4) */
@@ -123,52 +115,10 @@ int main(int argc, const char **argv)
             return -1;
     }
 
-    int dev_nb;
-    struct ibv_device **dev = ibv_get_device_list(&dev_nb);
-    assert(dev && dev_nb && "ibv_get_device_list() failed");
-
-    int i;
-    for (i=0; i<dev_nb; i++)
-        if (0 == strcmp(dev[i]->name, argv[1]))
-            break;
-    assert(i != dev_nb && "device not found");
-
-    struct ibv_context *ctx = ibv_open_device(dev[i]);
-    assert(ctx && "ibv_open_device() failed");
-
-    struct ibv_cq *cq = ibv_create_cq(ctx, TXNB, 0, 0, 0);
-    assert(cq && "ibv_create_cq() failed");
-
-    struct ibv_pd *pd = ibv_alloc_pd(ctx);
-    assert(pd && "ibv_alloc_pd() failed");
-
-    struct ibv_qp_init_attr qpia = {0};
-    qpia.send_cq = cq;
-    qpia.recv_cq = cq;
-    qpia.cap.max_send_wr = TXSZ * TXNB;
-    qpia.cap.max_send_sge = 1;
-    qpia.qp_type = IBV_QPT_RAW_PACKET;
-    struct ibv_qp *qp = ibv_create_qp(pd, &qpia);
-    assert(qp && "ibv_create_qp() failed");
-
-    struct ibv_qp_attr qpa = {0};
-    qpa.qp_state = IBV_QPS_INIT;
-    qpa.port_num = 1;
-    int err = ibv_modify_qp (qp, &qpa, IBV_QP_STATE | IBV_QP_PORT);
-    assert(0 == err && "ibv_modify_qp(INIT) failed");
-
-    memset(&qpa, 0, sizeof(qpa));
-    qpa.qp_state = IBV_QPS_RTR;
-    err = ibv_modify_qp (qp, &qpa, IBV_QP_STATE);
-    assert(0 == err && "ibv_modify_qp(RTR) failed");
-
-    memset(&qpa, 0, sizeof(qpa));
-    qpa.qp_state = IBV_QPS_RTS;
-    err = ibv_modify_qp (qp, &qpa, IBV_QP_STATE);
-    assert(0 == err && "ibv_modify_qp(RTS) failed");
-
-    struct ibv_mr *mr = ibv_reg_mr(pd, (void *)packets_mr_addr, packets_mr_len, 0);
-    assert(mr && "ibv_reg_mr() failed");
+    struct ibv_cq *cq;
+    struct ibv_qp *qp;
+    uint32_t lkey;
+    rdma_create_qp(&cq, &qp, &lkey, argv[1], TXNB, TXNB * TXSZ, 0, (void *)packets_mr_addr, packets_mr_len, 0);
 
     static struct ibv_sge sge[TXNB][TXSZ] ALIGNED;
     static struct ibv_send_wr wr[TXNB][TXSZ] ALIGNED;
@@ -177,7 +127,7 @@ int main(int argc, const char **argv)
             int pktid = (i*TXSZ+j) % packets_nb;
             sge[i][j].addr = packets[pktid].addr;
             sge[i][j].length = packets[pktid].len;
-            sge[i][j].lkey = mr->lkey;
+            sge[i][j].lkey = lkey;
             wr[i][j].wr_id = i;
             wr[i][j].next = &wr[i][j+1];
             wr[i][j].sg_list = &sge[i][j];
@@ -194,7 +144,8 @@ int main(int argc, const char **argv)
         assert(0 == err && "ibv_post_send() failed");
     }
 
-    int tx = 0;
+    unsigned long tx = 0;
+    unsigned long refresh = 1;
     struct timeval last;
     gettimeofday(&last, 0);
     for (;;) {
@@ -206,13 +157,14 @@ int main(int argc, const char **argv)
             assert(0 == err && "ibv_post_send() failed");
         }
         tx += nb;
-        if (tx >= REFRESH) {
+        if (tx >= refresh) {
             struct timeval now;
             gettimeofday(&now, 0);
             timersub(&now, &last, &last);
             double sec = last.tv_sec + last.tv_usec * 1e-6;
             double pps = (tx * TXSZ) / sec;
             printf(" === %g PPS\n", pps);
+            refresh = tx  >= sec ? tx / sec : 1;
             tx = 0;
             last = now;
         }
